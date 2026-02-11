@@ -61,7 +61,7 @@ Vote → Redis → Worker → Postgres → Result
 
 ## 🖼 Architecture Diagram
 
-![Architecture Diagram](diagrams/distributed-architecture.png)
+![Architecture Diagram](./diagrams/distributed-architecture.png)
 
 
 
