@@ -61,9 +61,9 @@ Vote → Redis → Worker → Postgres → Result
 
 ## 🖼 Architecture Diagram
 
-![Architecture Diagram](./docs/architecture-diagram.png)
+![Architecture Diagram](diagrams/distributed-architecture.png)
 
-(Place your exported diagram inside a `/docs` folder and reference it like above.)
+
 
 ---
 
@@ -309,5 +309,6 @@ Multi-Stack-DevOps-Infrastructure/
 ```
 
 ---
+
 
 
