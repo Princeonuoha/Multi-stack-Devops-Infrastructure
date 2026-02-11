@@ -1,0 +1,58 @@
+---
+- name: Fix Docker listener (disable socket activation, use unix socket)
+  hosts: all
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: Stop docker and docker.socket
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        state: stopped
+      loop:
+        - docker
+        - docker.socket
+      failed_when: false
+
+    - name: Create systemd override dir for docker.service
+      ansible.builtin.file:
+        path: /etc/systemd/system/docker.service.d
+        state: directory
+        mode: "0755"
+
+    - name: Force dockerd to listen on unix socket (not fd://)
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/docker.service.d/override.conf
+        mode: "0644"
+        content: |
+          [Service]
+          ExecStart=
+          ExecStart=/usr/bin/dockerd -H unix:///run/docker.sock --containerd=/run/containerd/containerd.sock
+
+    - name: Reload systemd
+      ansible.builtin.systemd:
+        daemon_reload: true
+
+    - name: Disable docker.socket (not needed now)
+      ansible.builtin.systemd:
+        name: docker.socket
+        enabled: false
+      failed_when: false
+
+    - name: Start containerd and docker
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        state: started
+        enabled: true
+      loop:
+        - containerd
+        - docker
+
+    - name: Verify docker works
+      ansible.builtin.command: docker info
+      register: docker_info
+      changed_when: false
+
+    - name: Print docker info (short)
+      ansible.builtin.debug:
+        msg: "{{ docker_info.stdout_lines[-10:] }}"

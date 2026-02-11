@@ -1,0 +1,71 @@
+---
+# reset.yml
+# Cleanly remove all voting app containers, volumes, and (optionally) Docker
+
+- name: Stop and remove application containers
+  hosts: all
+  become: true
+  tasks:
+    - name: Remove containers if present
+      community.docker.docker_container:
+        name: "{{ item }}"
+        state: absent
+        force_kill: true
+      loop:
+        - vote
+        - result
+        - voting-app
+        - result-app
+        - worker
+        - redis
+        - db
+        - postgres
+      ignore_errors: true
+
+
+- name: Remove Docker volumes (DB data)
+  hosts: all
+  become: true
+  tasks:
+    - name: Remove postgres data volume
+      community.docker.docker_volume:
+        name: postgres_data
+        state: absent
+      ignore_errors: true
+
+
+- name: Remove dangling Docker resources
+  hosts: all
+  become: true
+  tasks:
+    - name: Prune unused Docker objects
+      ansible.builtin.command: docker system prune -af
+      register: prune_output
+      changed_when: "'Total reclaimed space' in prune_output.stdout"
+
+
+# OPTIONAL — only run if you want a *true* clean machine
+- name: Uninstall Docker completely (optional)
+  hosts: all
+  become: true
+  vars:
+    remove_docker: false   # set to true if you want full uninstall
+  tasks:
+    - name: Remove Docker packages
+      ansible.builtin.apt:
+        name:
+          - docker.io
+          - python3-docker
+          - python3-requests
+        state: absent
+        purge: yes
+      when: remove_docker
+
+    - name: Remove Docker directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /var/lib/docker
+        - /var/lib/containerd
+      when: remove_docker

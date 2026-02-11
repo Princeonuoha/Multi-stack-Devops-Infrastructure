@@ -1,0 +1,255 @@
+---
+# docker.yml
+# Multi-host voting app deployment (frontend + backend + db)
+# Key principles:
+# - No pip installs (Ubuntu 24.04 PEP 668 safe)
+# - Works across 3 hosts (frontend / backend / db)
+# - Fixes "db" hostname resolution for multi-host using etc_hosts
+# - Lets the .NET apps own the schema (NO manual CREATE TABLE)
+# - Adds readiness checks + smoke tests
+
+# ============================================================
+# 1) Collect facts and compute service endpoints
+# ============================================================
+- name: Collect facts and compute service endpoints
+  hosts: all
+  become: true
+  gather_facts: true
+
+  tasks:
+    - name: Set service endpoints (delegate facts to localhost)
+      ansible.builtin.set_fact:
+        backend_private_ip: "{{ hostvars[groups['backend'][0]].ansible_default_ipv4.address }}"
+        db_private_ip: "{{ hostvars[groups['db'][0]].ansible_default_ipv4.address }}"
+      delegate_to: localhost
+      delegate_facts: true
+      run_once: true
+
+
+# ============================================================
+# 2) Install Docker + python deps (no pip) on all hosts
+# ============================================================
+- name: Install Docker + Python deps (no pip) on all hosts
+  hosts: all
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: Update apt cache
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Install Docker engine + python docker deps
+      ansible.builtin.apt:
+        name:
+          - docker.io
+          - python3-docker
+          - python3-requests
+        state: present
+
+    - name: Ensure containerd is enabled and running
+      ansible.builtin.systemd:
+        name: containerd
+        state: started
+        enabled: true
+
+    - name: Ensure docker is enabled and running
+      ansible.builtin.systemd:
+        name: docker
+        state: started
+        enabled: true
+
+
+# ============================================================
+# 3) DB Tier (Postgres)
+#    IMPORTANT: No schema init here. .NET app handles schema.
+# ============================================================
+- name: DB tier (Postgres)
+  hosts: db
+  become: true
+  vars:
+    pg_user: "postgres"
+    pg_pass: "postgres"
+    pg_db: "postgres"
+
+  tasks:
+    - name: Remove old postgres containers if present (cleanup)
+      community.docker.docker_container:
+        name: "{{ item }}"
+        state: absent
+        force_kill: true
+      loop:
+        - db
+        - postgres
+      ignore_errors: true
+
+    - name: Ensure Postgres data volume exists
+      community.docker.docker_volume:
+        name: postgres_data
+        state: present
+
+    - name: Run Postgres container
+      community.docker.docker_container:
+        name: postgres
+        image: postgres:15-alpine
+        published_ports:
+          - "5432:5432"
+        env:
+          POSTGRES_USER: "{{ pg_user }}"
+          POSTGRES_PASSWORD: "{{ pg_pass }}"
+          POSTGRES_DB: "{{ pg_db }}"
+        volumes:
+          - "postgres_data:/var/lib/postgresql/data"
+        restart_policy: always
+        state: started
+        recreate: true
+
+    - name: Wait for Postgres to accept TCP connections (local on DB host)
+      ansible.builtin.wait_for:
+        host: "127.0.0.1"
+        port: 5432
+        timeout: 120
+
+
+# ============================================================
+# 4) Backend Tier (Redis + Worker)
+# ============================================================
+- name: Backend tier (Redis + Worker)
+  hosts: backend
+  become: true
+  vars:
+    db_ip: "{{ hostvars['localhost'].db_private_ip }}"
+
+  tasks:
+    - name: Ensure backend docker network exists
+      community.docker.docker_network:
+        name: backend-net
+        state: present
+
+    - name: Run Redis
+      community.docker.docker_container:
+        name: redis
+        image: redis:alpine
+        networks:
+          - name: backend-net
+        published_ports:
+          - "6379:6379"
+        restart_policy: always
+        state: started
+        recreate: true
+
+    - name: Wait for Redis port (on backend host private IP)
+      ansible.builtin.wait_for:
+        host: "{{ ansible_default_ipv4.address }}"
+        port: 6379
+        timeout: 60
+
+    - name: Wait for DB port from backend
+      ansible.builtin.wait_for:
+        host: "{{ db_ip }}"
+        port: 5432
+        timeout: 120
+
+    - name: Run Worker
+      community.docker.docker_container:
+        name: worker
+        image: princeonuoha/worker-app:latest
+        networks:
+          - name: backend-net
+        restart_policy: always
+        state: started
+        recreate: true
+        env:
+          REDIS_HOST: "redis"
+          POSTGRES_HOST: "{{ db_ip }}"
+          POSTGRES_USER: "postgres"
+          POSTGRES_PASSWORD: "postgres"
+          POSTGRES_DB: "postgres"
+        etc_hosts:
+          db: "{{ db_ip }}"
+
+
+
+# ============================================================
+# 5) Frontend Tier (Vote + Result)
+# ============================================================
+- name: Frontend tier (Vote + Result)
+  hosts: frontend
+  become: true
+  vars:
+    backend_ip: "{{ hostvars['localhost'].backend_private_ip }}"
+    db_ip: "{{ hostvars['localhost'].db_private_ip }}"
+
+  tasks:
+    - name: Remove old frontend containers if present (cleanup)
+      community.docker.docker_container:
+        name: "{{ item }}"
+        state: absent
+        force_kill: true
+      loop:
+        - vote
+        - result
+        - voting-app
+        - result-app
+      ignore_errors: true
+
+    - name: Wait for Redis port from frontend host (points to backend host)
+      ansible.builtin.wait_for:
+        host: "{{ backend_ip }}"
+        port: 6379
+        timeout: 120
+
+    - name: Wait for DB port from frontend host
+      ansible.builtin.wait_for:
+        host: "{{ db_ip }}"
+        port: 5432
+        timeout: 120
+
+    - name: Run Voting App (port 80)
+      community.docker.docker_container:
+        name: vote
+        image: princeonuoha/voting-app:latest
+        published_ports:
+          - "80:80"
+        restart_policy: always
+        state: started
+        recreate: true
+        env:
+          # Vote app pushes votes to Redis on backend host
+          REDIS_HOST: "{{ backend_ip }}"
+
+    - name: Run Result App (port 81 -> container 80)
+      community.docker.docker_container:
+        name: result
+        image: princeonuoha/result-app:latest
+        published_ports:
+          - "81:80"
+        restart_policy: always
+        state: started
+        recreate: true
+        etc_hosts:
+          db: "{{ db_ip }}"
+        env:
+          POSTGRES_HOST: "{{ db_ip }}"
+          POSTGRES_USER: "postgres"
+          POSTGRES_PASSWORD: "postgres"
+          POSTGRES_DB: "postgres"
+
+    - name: Smoke test - Vote app local HTTP
+      ansible.builtin.uri:
+        url: "http://127.0.0.1/"
+        status_code: [200, 302]
+      register: vote_smoke
+      retries: 10
+      delay: 2
+      until: vote_smoke.status in [200, 302]
+
+    - name: Smoke test - Result app local HTTP
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:81/"
+        status_code: [200, 302]
+      register: result_smoke
+      retries: 20
+      delay: 3
+      until: result_smoke.status in [200, 302]

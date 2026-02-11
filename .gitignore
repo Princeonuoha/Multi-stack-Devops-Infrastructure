@@ -1,0 +1,15 @@
+# Terraform
+terraform/.terraform/
+terraform/.terraform.lock.hcl
+terraform/terraform.tfstate*
+terraform/terraform.tfvars
+
+# Ansible
+*.retry
+ansible/inventory/hosts.ini
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
+
